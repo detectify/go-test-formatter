@@ -2,10 +2,11 @@ package teamcity
 
 import (
 	"fmt"
-	"github.com/detectify/go-test-formatter/formatters"
-	"github.com/detectify/go-test-formatter/tests"
 	"io"
 	"strings"
+
+	"github.com/detectify/go-test-formatter/formatters"
+	"github.com/detectify/go-test-formatter/tests"
 )
 
 const (
@@ -26,7 +27,10 @@ type Formatter struct {
 // interpret.
 func (f *Formatter) Format(suites []*tests.Suite, writer io.Writer) error {
 	for _, suite := range suites {
-		return f.printSuite(suite, writer)
+		err := f.printSuite(suite, writer)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
