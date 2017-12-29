@@ -25,9 +25,9 @@ type Formatter struct {
 
 // Format formats a collection of test suites into something TeamCity can
 // interpret.
-func (f *Formatter) Format(suites []*tests.Suite, writer io.Writer) error {
-	for _, suite := range suites {
-		err := f.printSuite(suite, writer)
+func (f *Formatter) Format(packages []*tests.Package, writer io.Writer) error {
+	for _, pack := range packages {
+		err := f.printPackage(pack, writer)
 		if err != nil {
 			return err
 		}
@@ -36,12 +36,23 @@ func (f *Formatter) Format(suites []*tests.Suite, writer io.Writer) error {
 	return nil
 }
 
-func (f *Formatter) printSuite(suite *tests.Suite, writer io.Writer) error {
-	suiteName := escape(suite.Name)
+func (f *Formatter) printPackage(pack *tests.Package, writer io.Writer) error {
+	packName := escape(pack.Name)
 
-	fmt.Fprintf(writer, testSuiteStarted, suiteName)
+	if pack.HasTestCases() {
+		for _, test := range pack.Tests {
+			err := f.printTestSuite(test, packName, writer)
 
-	for _, test := range suite.Tests {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	fmt.Fprintf(writer, testSuiteStarted, packName)
+
+	for _, test := range pack.Tests {
 		err := f.printTest(test, writer)
 
 		if err != nil {
@@ -49,12 +60,48 @@ func (f *Formatter) printSuite(suite *tests.Suite, writer io.Writer) error {
 		}
 	}
 
-	fmt.Fprintf(writer, testSuiteFinished, suiteName)
+	fmt.Fprintf(writer, testSuiteFinished, packName)
 
 	return nil
 }
 
 func (f *Formatter) printTest(test *tests.Test, writer io.Writer) error {
+	name := escape(test.Name)
+
+	fmt.Fprintf(writer, testStarted, name)
+
+	if test.Failed {
+		message := escape(test.Message)
+
+		fmt.Fprintf(writer, testFailed, name, message)
+	} else if test.Skipped {
+		fmt.Fprintf(writer, testIgnored, name)
+	}
+
+	fmt.Fprintf(writer, testFinished, name, test.Time)
+
+	return nil
+}
+
+func (f *Formatter) printTestSuite(test *tests.Test, packName string, writer io.Writer) error {
+	name := fmt.Sprintf("%s/%s", packName, escape(test.Name))
+
+	fmt.Fprintf(writer, testSuiteStarted, name)
+
+	for _, testCase := range test.Cases {
+		err := f.printTestCase(testCase, writer)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintf(writer, testSuiteFinished, name)
+
+	return nil
+}
+
+func (f *Formatter) printTestCase(test *tests.TestCase, writer io.Writer) error {
 	name := escape(test.Name)
 
 	fmt.Fprintf(writer, testStarted, name)

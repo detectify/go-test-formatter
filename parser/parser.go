@@ -3,79 +3,46 @@ package parser
 import (
 	"bufio"
 	"fmt"
-	"github.com/detectify/go-test-formatter/tests"
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/detectify/go-test-formatter/tests"
 )
 
-const (
-	startPattern       = "^=== RUN:?[[:space:]]+([a-zA-Z_][^[:space:]]*)"
-	endPattern         = "^--- (PASS|FAIL|SKIP):[[:space:]]+([a-zA-Z_][^[:space:]]*) \\((\\d+(.\\d+)?)"
-	suitePattern       = "^(ok|FAIL)[ \t]+([^ \t]+)[ \t]+(\\d+.\\d+)"
-	noFilesPattern     = "^\\?.*\\[no test files\\]$"
-	buildFailedPattern = "^FAIL.*\\[(build|setup) failed\\]$"
+var (
+	findStart     = regexp.MustCompile("^=== RUN:?[[:space:]]+([a-zA-Z_][^[:space:]]*)").FindStringSubmatch
+	findEnd       = regexp.MustCompile("^--- (PASS|FAIL|SKIP):[[:space:]]+([a-zA-Z_][^[:space:]]*) \\((\\d+(.\\d+)?)").FindStringSubmatch
+	findPackage   = regexp.MustCompile("^(ok|FAIL)[ \t]+([^ \t]+)[ \t]+(\\d+.\\d+)").FindStringSubmatch
+	isStatus      = regexp.MustCompile("^(PASS|FAIL|SKIP)$").MatchString
+	isNoFiles     = regexp.MustCompile("^\\?.*\\[no test files\\]$").MatchString
+	isBuildFailed = regexp.MustCompile("^FAIL.*\\[(build|setup) failed\\]$").MatchString
+	isExit        = regexp.MustCompile("^exit status -?\\d+").MatchString
 )
 
 // A Parser parses `go test -v` output into an object model.
 type Parser struct {
+	packages     []*tests.Package
+	packageTests []*tests.Test
+	current      *tests.Test
 }
 
 // New creates a new parser.
 func New() *Parser {
-	return &Parser{}
+	return &Parser{
+		packages:     make([]*tests.Package, 0),
+		packageTests: make([]*tests.Test, 0),
+	}
 }
 
 // Parse parses `go test -v` output into an object model.
-func (p *Parser) Parse(reader io.Reader) ([]*tests.Suite, error) {
-	findStart := regexp.MustCompile(startPattern).FindStringSubmatch
-	findEnd := regexp.MustCompile(endPattern).FindStringSubmatch
-	findSuite := regexp.MustCompile(suitePattern).FindStringSubmatch
-	isNoFiles := regexp.MustCompile(noFilesPattern).MatchString
-	isBuildFailed := regexp.MustCompile(buildFailedPattern).MatchString
-	isExit := regexp.MustCompile("^exit status -?\\d+").MatchString
-
-	var suites []*tests.Suite
-
-	suiteStack := &tests.SuiteStack{}
-
-	var currentTest *tests.Test
-	var currentSuite *tests.Suite
-	var output []string
-
-	handlePanic := func() {
-		currentTest.Failed = true
-		currentTest.Skipped = false
-		currentTest.Time = "N/A"
-		currentSuite.Tests = append(currentSuite.Tests, currentTest)
-		currentTest = nil
-	}
-
-	appendError := func() error {
-		if len(output) > 0 && currentSuite != nil && len(currentSuite.Tests) > 0 {
-			message := strings.Join(output, "\n")
-
-			lastIndex := len(currentSuite.Tests) - 1
-
-			if currentSuite.Tests[lastIndex].Message == "" {
-				currentSuite.Tests[lastIndex].Message = message
-			} else {
-				currentSuite.Tests[lastIndex].Message += "\n" + message
-			}
-		}
-
-		output = make([]string, 0)
-
-		return nil
-	}
-
+func (p *Parser) Parse(reader io.Reader) ([]*tests.Package, error) {
 	scanner := bufio.NewScanner(reader)
 
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
-		line := scanner.Text()
+		line := strings.TrimSpace(scanner.Text())
 
-		// Skip folders without tests.
-		if isNoFiles(line) {
+		if len(line) == 0 || isNoFiles(line) || isExit(line) || isStatus(line) {
 			continue
 		}
 
@@ -83,103 +50,92 @@ func (p *Parser) Parse(reader io.Reader) ([]*tests.Suite, error) {
 			return nil, fmt.Errorf("%d: package build failed: %s", lineNumber, line)
 		}
 
-		if currentSuite == nil {
-			currentSuite = &tests.Suite{}
-		}
-
 		tokens := findStart(line)
-
 		if tokens != nil {
-			if currentTest != nil {
-				if suiteStack.Count() == 0 {
-					suiteStack.Push(currentSuite)
-
-					currentSuite = &tests.Suite{Name: currentTest.Name}
-				} else {
-					handlePanic()
-				}
-			}
-
-			if e := appendError(); e != nil {
-				return nil, e
-			}
-
-			currentTest = &tests.Test{
-				Name: tokens[1],
-			}
-
+			p.parseStart(tokens)
 			continue
 		}
 
 		tokens = findEnd(line)
-
 		if tokens != nil {
-			if currentTest == nil {
-				if suiteStack.Count() > 0 {
-					previousSuite := suiteStack.Pop()
-
-					suites = append(suites, currentSuite)
-
-					currentSuite = previousSuite
-
-					continue
-				} else {
-					return nil, fmt.Errorf("%d: orphan end test", lineNumber)
-				}
+			if !p.parseEnd(tokens) {
+				return nil, fmt.Errorf("%d: orphan/invalid end test", lineNumber)
 			}
-
-			if tokens[2] != currentTest.Name {
-				err := fmt.Errorf("%d: name mismatch (try disabling parallel mode)", lineNumber)
-
-				return nil, err
-			}
-
-			currentTest.Failed = (tokens[1] == "FAIL") // || (failOnRace && hasDatarace(output))
-			currentTest.Skipped = tokens[1] == "SKIP"
-			currentTest.Passed = tokens[1] == "PASS"
-			currentTest.Time = tokens[3]
-			currentTest.Message = strings.Join(output, "\n")
-
-			currentSuite.Tests = append(currentSuite.Tests, currentTest)
-
-			currentTest = nil
-
-			output = make([]string, 0)
-
 			continue
 		}
 
-		tokens = findSuite(line)
-
+		tokens = findPackage(line)
 		if tokens != nil {
-			if currentTest != nil {
-				handlePanic()
-			}
-
-			if e := appendError(); e != nil {
-				return nil, e
-			}
-
-			currentSuite.Name = tokens[2]
-			currentSuite.Time = tokens[3]
-
-			suites = append(suites, currentSuite)
-
-			currentSuite = nil
-
+			p.parsePackage(tokens)
 			continue
 		}
-
-		if isExit(line) || line == "FAIL" || line == "PASS" {
-			continue
-		}
-
-		output = append(output, line)
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	return suites, nil
+	packages := p.packages
+
+	return packages, nil
+}
+
+func (p *Parser) parseStart(tokens []string) {
+	if p.current == nil || p.current.Time != "" {
+		// there is no test or the test has ended
+		// assume test case of main
+		p.current = &tests.Test{
+			Name:  tokens[1],
+			Cases: make(map[string]*tests.TestCase, 0),
+		}
+		p.packageTests = append(p.packageTests, p.current)
+		return
+	}
+
+	// assume this is a test case
+	p.current.Cases[tokens[1]] = &tests.TestCase{
+		Name: tokens[1],
+	}
+}
+
+func (p *Parser) parseEnd(tokens []string) bool {
+	if p.current == nil {
+		// there is no test
+		return false
+	}
+
+	if tokens[2] == p.current.Name {
+		// ends the test
+		p.current.Failed = tokens[1] == "FAIL"
+		p.current.Skipped = tokens[1] == "SKIP"
+		p.current.Passed = tokens[1] == "PASS"
+		p.current.Time = tokens[3]
+		return true
+	}
+
+	for name, test := range p.current.Cases {
+		if tokens[2] == name {
+			// ends a test case
+			test.Failed = tokens[1] == "FAIL"
+			test.Skipped = tokens[1] == "SKIP"
+			test.Passed = tokens[1] == "PASS"
+			test.Time = tokens[3]
+			return true
+		}
+	}
+
+	// name does not match any test/test case
+	return false
+}
+
+func (p *Parser) parsePackage(tokens []string) {
+	p.packages = append(p.packages, &tests.Package{
+		Name:   tokens[2],
+		Time:   tokens[3],
+		Status: tokens[1],
+		Tests:  p.packageTests,
+	})
+
+	p.packageTests = make([]*tests.Test, 0)
+	p.current = nil
 }
